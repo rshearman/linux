@@ -12,6 +12,7 @@ struct netns_mpls {
 	size_t platform_labels;
 	struct mpls_route __rcu * __rcu *platform_label;
 	struct ctl_table_header *ctl;
+	struct proc_dir_entry *proc_net_devsnmp;
 };
 
 #endif /* __NETNS_MPLS_H__ */
