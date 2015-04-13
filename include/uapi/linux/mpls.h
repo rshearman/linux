@@ -43,4 +43,20 @@ struct mpls_label {
 
 #define MPLS_LABEL_FIRST_UNRESERVED	16 /* RFC3032 */
 
+/* RTA_MPLS_PAYLOAD_TYPE - u32 specifying type and zero or more flags */
+enum rtmpls_payload_type {
+	RTMPT_IP		= 0x0000, /* IPv4 or IPv6 */
+	RTMPT_IPV4		= 0x0004,
+	RTMPT_IPV6		= 0x0006,
+
+	/* Other types not implemented:
+	 *  - Pseudo-wire with or without control word (RFC4385)
+	 *  - GAL (RFC5586)
+	 */
+};
+#define RTMPT_TYPE_MASK		0x0000ffff
+
+#define RTMPT_FLAG_BOS_ONLY	0x80000000
+#define RTMPT_ALL_FLAGS		(RTMPT_FLAG_BOS_ONLY)
+
 #endif /* _UAPI_MPLS_H */

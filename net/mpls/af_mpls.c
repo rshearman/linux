@@ -23,23 +23,12 @@
 /* This maximum ha length copied from the definition of struct neighbour */
 #define MAX_VIA_ALEN (ALIGN(MAX_ADDR_LEN, sizeof(unsigned long)))
 
-enum mpls_payload_type {
-	MPT_UNSPEC, /* IPv4 or IPv6 */
-	MPT_IPV4 = 4,
-	MPT_IPV6 = 6,
-
-	/* Other types not implemented:
-	 *  - Pseudo-wire with or without control word (RFC4385)
-	 *  - GAL (RFC5586)
-	 */
-};
-
 struct mpls_route { /* next hop label forwarding entry */
 	struct net_device __rcu *rt_dev;
 	struct rcu_head		rt_rcu;
 	u32			rt_label[MAX_NEW_LABELS];
+	u32                     rt_payload_type;
 	u8			rt_protocol; /* routing protocol that set this entry */
-	u8                      rt_payload_type;
 	u8			rt_labels;
 	u8			rt_via_alen;
 	u8			rt_via_table;
@@ -101,7 +90,7 @@ static bool mpls_pkt_too_big(const struct sk_buff *skb, unsigned int mtu)
 static bool mpls_egress(struct mpls_route *rt, struct sk_buff *skb,
 			struct mpls_entry_decoded dec)
 {
-	enum mpls_payload_type payload_type;
+	enum rtmpls_payload_type payload_type;
 	bool success = false;
 
 	/* The IPv4 code below accesses through the IPv4 header
@@ -117,12 +106,12 @@ static bool mpls_egress(struct mpls_route *rt, struct sk_buff *skb,
 	if (!pskb_may_pull(skb, 12))
 		return false;
 
-	payload_type = rt->rt_payload_type;
-	if (payload_type == MPT_UNSPEC)
+	payload_type = rt->rt_payload_type & RTMPT_TYPE_MASK;
+	if (payload_type == RTMPT_IP)
 		payload_type = ip_hdr(skb)->version;
 
 	switch (payload_type) {
-	case MPT_IPV4: {
+	case RTMPT_IPV4: {
 		struct iphdr *hdr4 = ip_hdr(skb);
 		skb->protocol = htons(ETH_P_IP);
 		csum_replace2(&hdr4->check,
@@ -132,14 +121,15 @@ static bool mpls_egress(struct mpls_route *rt, struct sk_buff *skb,
 		success = true;
 		break;
 	}
-	case MPT_IPV6: {
+	case RTMPT_IPV6: {
 		struct ipv6hdr *hdr6 = ipv6_hdr(skb);
 		skb->protocol = htons(ETH_P_IPV6);
 		hdr6->hop_limit = dec.ttl;
 		success = true;
 		break;
 	}
-	case MPT_UNSPEC:
+	case RTMPT_IP:
+		/* Should have decided which protocol it is by now */
 		break;
 	}
 
@@ -225,6 +215,11 @@ static int mpls_forward(struct sk_buff *skb, struct net_device *dev,
 		/* Penultimate hop popping */
 		if (!mpls_egress(rt, skb, dec))
 			goto drop;
+	} else if (rt->rt_payload_type & RTMPT_FLAG_BOS_ONLY) {
+		/* Labeled traffic destined to unlabeled peer should
+		 * be discarded
+		 */
+		goto drop;
 	} else {
 		bool bos;
 		int i;
@@ -258,6 +253,7 @@ static struct packet_type mpls_packet_type __read_mostly = {
 static const struct nla_policy rtm_mpls_policy[RTA_MAX+1] = {
 	[RTA_DST]		= { .type = NLA_U32 },
 	[RTA_OIF]		= { .type = NLA_U32 },
+	[RTA_MPLS_PAYLOAD_TYPE]	= { .type = NLA_U32 },
 };
 
 struct mpls_route_config {
@@ -270,7 +266,7 @@ struct mpls_route_config {
 	u32			rc_output_labels;
 	u32			rc_output_label[MAX_NEW_LABELS];
 	u32			rc_nlflags;
-	enum mpls_payload_type	rc_payload_type;
+	u32			rc_payload_type;
 	struct nl_info		rc_nlinfo;
 };
 
@@ -783,6 +779,24 @@ static int rtm_to_route_config(struct sk_buff *skb,  struct nlmsghdr *nlh,
 			memcpy(cfg->rc_via, via->rtvia_addr, cfg->rc_via_alen);
 			break;
 		}
+		case RTA_MPLS_PAYLOAD_TYPE:
+			cfg->rc_payload_type = nla_get_u32(nla);
+
+			/* Ensure there are no unsupported flags */
+			if (cfg->rc_payload_type &
+			    ~(RTMPT_TYPE_MASK | RTMPT_ALL_FLAGS))
+				goto errout;
+
+			switch (cfg->rc_payload_type & RTMPT_TYPE_MASK) {
+			case RTMPT_IP:
+			case RTMPT_IPV4:
+			case RTMPT_IPV6:
+				break;
+			default:
+				goto errout;
+			}
+
+			break;
 		default:
 			/* Unsupported attribute */
 			goto errout;
@@ -851,6 +865,9 @@ static int mpls_dump_route(struct sk_buff *skb, u32 portid, u32 seq, int event,
 		goto nla_put_failure;
 	if (nla_put_labels(skb, RTA_DST, 1, &label))
 		goto nla_put_failure;
+	if (rt->rt_payload_type &&
+	    nla_put_u32(skb, RTA_MPLS_PAYLOAD_TYPE, rt->rt_payload_type))
+		goto nla_put_failure;
 
 	nlmsg_end(skb, nlh);
 	return 0;
@@ -901,6 +918,8 @@ static inline size_t lfib_nlmsg_size(struct mpls_route *rt)
 		payload += nla_total_size(rt->rt_labels * 4);
 	if (rt->rt_dev)					/* RTA_OIF */
 		payload += nla_total_size(4);
+	if (rt->rt_payload_type)
+		payload += nla_total_size(4); /* RTA_MPLS_PAYLOAD_TYPE */
 	return payload;
 }
 
@@ -957,7 +976,7 @@ static int resize_platform_label_table(struct net *net, size_t limit)
 			goto nort0;
 		RCU_INIT_POINTER(rt0->rt_dev, lo);
 		rt0->rt_protocol = RTPROT_KERNEL;
-		rt0->rt_payload_type = MPT_IPV4;
+		rt0->rt_payload_type = RTMPT_IPV4;
 		rt0->rt_via_table = NEIGH_LINK_TABLE;
 		memcpy(rt0->rt_via, lo->dev_addr, lo->addr_len);
 	}
@@ -968,7 +987,7 @@ static int resize_platform_label_table(struct net *net, size_t limit)
 			goto nort2;
 		RCU_INIT_POINTER(rt2->rt_dev, lo);
 		rt2->rt_protocol = RTPROT_KERNEL;
-		rt2->rt_payload_type = MPT_IPV6;
+		rt2->rt_payload_type = RTMPT_IPV6;
 		rt2->rt_via_table = NEIGH_LINK_TABLE;
 		memcpy(rt2->rt_via, lo->dev_addr, lo->addr_len);
 	}
