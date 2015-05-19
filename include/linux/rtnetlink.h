@@ -22,6 +22,13 @@ struct sk_buff *rtmsg_ifinfo_build_skb(int type, struct net_device *dev,
 void rtmsg_ifinfo_send(struct sk_buff *skb, struct net_device *dev,
 		       gfp_t flags);
 
+int rtnl_parse_encap(const struct net_device *dev, const struct nlattr *nla,
+		     void *encap);
+int rtnl_fill_encap(const struct net_device *dev, struct sk_buff *skb,
+		    int encap_len, const void *encap);
+int rtnl_match_encap(const struct net_device *dev, const struct nlattr *nla,
+		     int encap_len, const void *encap);
+
 
 /* RTNL is used as a global lock for all changes to network configuration  */
 extern void rtnl_lock(void);

@@ -506,4 +506,15 @@ static inline struct xfrm_state *dst_xfrm(const struct dst_entry *dst)
 }
 #endif
 
+/* Get encap data for destination */
+static inline int dst_get_encap(struct sk_buff *skb, const void **encap)
+{
+	const struct dst_entry *dst = skb_dst(skb);
+
+	if (!dst || !dst->ops->get_encap)
+		return 0;
+
+	return dst->ops->get_encap(dst, encap);
+}
+
 #endif /* _NET_DST_H */

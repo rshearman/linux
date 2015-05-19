@@ -1441,6 +1441,42 @@ static int validate_linkmsg(struct net_device *dev, struct nlattr *tb[])
 	return 0;
 }
 
+int rtnl_parse_encap(const struct net_device *dev, const struct nlattr *nla,
+		     void *encap)
+{
+	const struct rtnl_link_ops *ops = dev->rtnl_link_ops;
+
+	if (!ops->parse_encap)
+		return -EINVAL;
+
+	return ops->parse_encap(dev, nla, encap);
+}
+EXPORT_SYMBOL(rtnl_parse_encap);
+
+int rtnl_fill_encap(const struct net_device *dev, struct sk_buff *skb,
+		    int encap_len, const void *encap)
+{
+	const struct rtnl_link_ops *ops = dev->rtnl_link_ops;
+
+	if (!ops->fill_encap)
+		return -EINVAL;
+
+	return ops->fill_encap(dev, skb, encap_len, encap);
+}
+EXPORT_SYMBOL(rtnl_fill_encap);
+
+int rtnl_match_encap(const struct net_device *dev, const struct nlattr *nla,
+		     int encap_len, const void *encap)
+{
+	const struct rtnl_link_ops *ops = dev->rtnl_link_ops;
+
+	if (!ops->match_encap)
+		return -EINVAL;
+
+	return ops->match_encap(dev, nla, encap_len, encap);
+}
+EXPORT_SYMBOL(rtnl_match_encap);
+
 static int do_setvfinfo(struct net_device *dev, struct nlattr *attr)
 {
 	int rem, err = -EINVAL;

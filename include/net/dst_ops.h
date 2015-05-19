@@ -32,6 +32,8 @@ struct dst_ops {
 	struct neighbour *	(*neigh_lookup)(const struct dst_entry *dst,
 						struct sk_buff *skb,
 						const void *daddr);
+	int			(*get_encap)(const struct dst_entry *dst,
+					     const void **encap);
 
 	struct kmem_cache	*kmem_cachep;
 
