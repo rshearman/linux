@@ -95,6 +95,17 @@ struct rtnl_link_ops {
 						   const struct net_device *dev,
 						   const struct net_device *slave_dev);
 	struct net		*(*get_link_net)(const struct net_device *dev);
+	int			(*parse_encap)(const struct net_device *dev,
+					       const struct nlattr *nla,
+					       void *encap);
+	int			(*fill_encap)(const struct net_device *dev,
+					      struct sk_buff *skb,
+					      int encap_len,
+					      const void *encap);
+	int			(*match_encap)(const struct net_device *dev,
+					       const struct nlattr *nla,
+					       int encap_len,
+					       const void *encap);
 };
 
 int __rtnl_link_register(struct rtnl_link_ops *ops);

@@ -309,6 +309,7 @@ enum rtattr_type_t {
 	RTA_NEWDST,
 	RTA_PREF,
 	RTA_MPLS_PAYLOAD_TYPE,
+	RTA_ENCAP,
 	__RTA_MAX
 };
 
