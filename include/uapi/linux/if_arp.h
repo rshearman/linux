@@ -88,6 +88,7 @@
 #define ARPHRD_IEEE80211_RADIOTAP 803	/* IEEE 802.11 + radiotap header */
 #define ARPHRD_IEEE802154	  804
 #define ARPHRD_IEEE802154_MONITOR 805	/* IEEE 802.15.4 network monitor */
+#define ARPHRD_MPLS	806		/* IP and IPv6 over MPLS tunnels */
 
 #define ARPHRD_PHONET	820		/* PhoNet media type		*/
 #define ARPHRD_PHONET_PIPE 821		/* PhoNet pipe header		*/

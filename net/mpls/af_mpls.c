@@ -721,6 +721,7 @@ int nla_put_labels(struct sk_buff *skb, int attrtype,
 
 	return 0;
 }
+EXPORT_SYMBOL(nla_put_labels);
 
 int nla_get_labels(const struct nlattr *nla,
 		   u32 max_labels, u32 *labels, u32 label[])
@@ -766,6 +767,7 @@ int nla_get_labels(const struct nlattr *nla,
 	*labels = nla_labels;
 	return 0;
 }
+EXPORT_SYMBOL(nla_get_labels);
 
 static int rtm_to_route_config(struct sk_buff *skb,  struct nlmsghdr *nlh,
 			       struct mpls_route_config *cfg)
