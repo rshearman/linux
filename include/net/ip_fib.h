@@ -44,6 +44,7 @@ struct fib_config {
 	u32			fc_flow;
 	u32			fc_nlflags;
 	struct nl_info		fc_nlinfo;
+	struct nlattr *fc_encap;
  };
 
 struct fib_info;
@@ -75,6 +76,7 @@ struct fib_nh {
 	struct fib_info		*nh_parent;
 	unsigned int		nh_flags;
 	unsigned char		nh_scope;
+	unsigned char		nh_encap_len;
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 	int			nh_weight;
 	int			nh_power;

@@ -257,6 +257,9 @@ static inline int nh_comp(const struct fib_info *fi, const struct fib_info *ofi)
 	const struct fib_nh *onh = ofi->fib_nh;
 
 	for_nexthops(fi) {
+		const void *onh_encap = fib_get_nh_encap(fi, nh);
+		const void *nh_encap = fib_get_nh_encap(fi, nh);
+
 		if (nh->nh_oif != onh->nh_oif ||
 		    nh->nh_gw  != onh->nh_gw ||
 		    nh->nh_scope != onh->nh_scope ||
@@ -266,7 +269,10 @@ static inline int nh_comp(const struct fib_info *fi, const struct fib_info *ofi)
 #ifdef CONFIG_IP_ROUTE_CLASSID
 		    nh->nh_tclassid != onh->nh_tclassid ||
 #endif
-		    ((nh->nh_flags ^ onh->nh_flags) & ~RTNH_F_DEAD))
+		    ((nh->nh_flags ^ onh->nh_flags) & ~RTNH_F_DEAD) ||
+		    nh->nh_encap_len != onh->nh_encap_len ||
+		    memcmp(nh_encap, onh_encap, nh->nh_encap_len)
+			)
 			return -1;
 		onh++;
 	} endfor_nexthops(fi);
@@ -374,6 +380,11 @@ static inline size_t fib_nlmsg_size(struct fib_info *fi)
 		/* may contain flow and gateway attribute */
 		nhsize += 2 * nla_total_size(4);
 
+		for_nexthops(fi) {
+			if (nh->nh_encap_len)
+				nhsize += nla_total_size(nh->nh_encap_len);
+		} endfor_nexthops(fi);
+
 		/* all nexthops are packed in a nested attribute */
 		payload += nla_total_size(fi->fib_nhs * nhsize);
 	}
@@ -434,6 +445,83 @@ static int fib_detect_death(struct fib_info *fi, int order,
 	return 1;
 }
 
+static int fib_total_encap(struct fib_config *cfg)
+{
+	struct net *net = cfg->fc_nlinfo.nl_net;
+	int total_encap_len = 0;
+
+	if (cfg->fc_mp) {
+		int remaining = cfg->fc_mp_len;
+		struct rtnexthop *rtnh = cfg->fc_mp;
+
+		while (rtnh_ok(rtnh, remaining)) {
+			struct nlattr *nla, *attrs = rtnh_attrs(rtnh);
+			int attrlen;
+
+			attrlen = rtnh_attrlen(rtnh);
+			nla = nla_find(attrs, attrlen, RTA_ENCAP);
+			if (nla) {
+				struct net_device *dev;
+				int len;
+
+				dev = __dev_get_by_index(net,
+							 rtnh->rtnh_ifindex);
+				if (!dev)
+					return -EINVAL;
+
+				/* Determine space required */
+				len = rtnl_parse_encap(dev, nla, NULL);
+				if (len < 0)
+					return len;
+
+				total_encap_len += len;
+			}
+
+			rtnh = rtnh_next(rtnh, &remaining);
+		}
+	} else {
+		if (cfg->fc_encap) {
+			struct net_device *dev;
+			int len;
+
+			dev = __dev_get_by_index(net, cfg->fc_oif);
+			if (!dev)
+				return -EINVAL;
+
+			/* Determine space required */
+			len = rtnl_parse_encap(dev, cfg->fc_encap, NULL);
+			if (len < 0)
+				return len;
+
+			total_encap_len += len;
+		}
+	}
+
+	return total_encap_len;
+}
+
+static void *__fib_get_nh_encap(const struct fib_info *fi,
+				const struct fib_nh *the_nh)
+{
+	char *cur_encap_ptr = (char *)(fi->fib_nh + fi->fib_nhs);
+
+	for_nexthops(fi) {
+		if (nh == the_nh)
+			return cur_encap_ptr;
+		cur_encap_ptr += nh->nh_encap_len;
+	} endfor_nexthops(fi);
+
+	return NULL;
+}
+
+const void *fib_get_nh_encap(const struct fib_info *fi, const struct fib_nh *nh)
+{
+	if (!nh->nh_encap_len)
+		return NULL;
+
+	return __fib_get_nh_encap(fi, nh);
+}
+
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 
 static int fib_count_nexthops(struct rtnexthop *rtnh, int remaining)
@@ -475,6 +563,26 @@ static int fib_get_nhs(struct fib_info *fi, struct rtnexthop *rtnh,
 			if (nexthop_nh->nh_tclassid)
 				fi->fib_net->ipv4.fib_num_tclassid_users++;
 #endif
+			nla = nla_find(attrs, attrlen, RTA_ENCAP);
+			if (nla) {
+				struct net *net = cfg->fc_nlinfo.nl_net;
+				struct net_device *dev;
+				void *nh_encap;
+				int len;
+
+				dev = __dev_get_by_index(net,
+							 nexthop_nh->nh_oif);
+				if (!dev)
+					return -EINVAL;
+
+				nh_encap = __fib_get_nh_encap(fi, nexthop_nh);
+
+				/* Fill in nh encap */
+				len = rtnl_parse_encap(dev, nla, nh_encap);
+				if (len < 0)
+					return len;
+				nexthop_nh->nh_encap_len = len;
+			}
 		}
 
 		rtnh = rtnh_next(rtnh, &remaining);
@@ -494,6 +602,17 @@ int fib_nh_match(struct fib_config *cfg, struct fib_info *fi)
 
 	if (cfg->fc_priority && cfg->fc_priority != fi->fib_priority)
 		return 1;
+
+	if (cfg->fc_encap) {
+		const void *nh_encap = fib_get_nh_encap(fi, fi->fib_nh);
+
+		if (!fi->fib_nh->nh_oif ||
+		    rtnl_match_encap(fi->fib_nh->nh_dev,
+				     cfg->fc_encap,
+				     fi->fib_nh->nh_encap_len,
+				     nh_encap))
+			return 1;
+	}
 
 	if (cfg->fc_oif || cfg->fc_gw) {
 		if ((!cfg->fc_oif || cfg->fc_oif == fi->fib_nh->nh_oif) &&
@@ -530,6 +649,17 @@ int fib_nh_match(struct fib_config *cfg, struct fib_info *fi)
 			if (nla && nla_get_u32(nla) != nh->nh_tclassid)
 				return 1;
 #endif
+			nla = nla_find(attrs, attrlen, RTA_ENCAP);
+			if (nla) {
+				const void *nh_encap = fib_get_nh_encap(fi, nh);
+
+				if (!nh->nh_oif ||
+				    rtnl_match_encap(nh->nh_dev,
+						     cfg->fc_encap,
+						     nh->nh_encap_len,
+						     nh_encap))
+					return 1;
+			}
 		}
 
 		rtnh = rtnh_next(rtnh, &remaining);
@@ -760,6 +890,7 @@ struct fib_info *fib_create_info(struct fib_config *cfg)
 	struct fib_info *ofi;
 	int nhs = 1;
 	struct net *net = cfg->fc_nlinfo.nl_net;
+	int encap_len;
 
 	if (cfg->fc_type > RTN_MAX)
 		goto err_inval;
@@ -798,7 +929,14 @@ struct fib_info *fib_create_info(struct fib_config *cfg)
 			goto failure;
 	}
 
-	fi = kzalloc(sizeof(*fi)+nhs*sizeof(struct fib_nh), GFP_KERNEL);
+	encap_len = fib_total_encap(cfg);
+	if (encap_len < 0) {
+		err = encap_len;
+		goto failure;
+	}
+
+	fi = kzalloc(sizeof(*fi) + nhs * sizeof(struct fib_nh) + encap_len,
+		     GFP_KERNEL);
 	if (!fi)
 		goto failure;
 	fib_info_cnt++;
@@ -886,6 +1024,26 @@ struct fib_info *fib_create_info(struct fib_config *cfg)
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 		nh->nh_weight = 1;
 #endif
+		if (cfg->fc_encap) {
+			struct net_device *dev;
+			void *nh_encap;
+			int len;
+
+			err = -EINVAL;
+			dev = __dev_get_by_index(net, nh->nh_oif);
+			if (!dev)
+				goto failure;
+
+			nh_encap = __fib_get_nh_encap(fi, nh);
+
+			/* Fill in nh encap */
+			len = rtnl_parse_encap(dev, cfg->fc_encap, nh_encap);
+			if (len < 0 || len > sizeof(nh->nh_encap_len) * 8) {
+				err = len;
+				goto failure;
+			}
+			nh->nh_encap_len = len;
+		}
 	}
 
 	if (fib_props[cfg->fc_type].error) {
@@ -1023,6 +1181,8 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
 	    nla_put_in_addr(skb, RTA_PREFSRC, fi->fib_prefsrc))
 		goto nla_put_failure;
 	if (fi->fib_nhs == 1) {
+		const void *nh_encap;
+
 		if (fi->fib_nh->nh_gw &&
 		    nla_put_in_addr(skb, RTA_GATEWAY, fi->fib_nh->nh_gw))
 			goto nla_put_failure;
@@ -1034,6 +1194,12 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
 		    nla_put_u32(skb, RTA_FLOW, fi->fib_nh[0].nh_tclassid))
 			goto nla_put_failure;
 #endif
+
+		nh_encap = fib_get_nh_encap(fi, &fi->fib_nh[0]);
+		if (nh_encap && rtnl_fill_encap(fi->fib_nh[0].nh_dev, skb,
+						fi->fib_nh[0].nh_encap_len,
+						nh_encap))
+			goto nla_put_failure;
 	}
 #ifdef CONFIG_IP_ROUTE_MULTIPATH
 	if (fi->fib_nhs > 1) {
@@ -1045,6 +1211,8 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
 			goto nla_put_failure;
 
 		for_nexthops(fi) {
+			const void *nh_encap;
+
 			rtnh = nla_reserve_nohdr(skb, sizeof(*rtnh));
 			if (!rtnh)
 				goto nla_put_failure;
@@ -1061,6 +1229,13 @@ int fib_dump_info(struct sk_buff *skb, u32 portid, u32 seq, int event,
 			    nla_put_u32(skb, RTA_FLOW, nh->nh_tclassid))
 				goto nla_put_failure;
 #endif
+
+			nh_encap = fib_get_nh_encap(fi, nh);
+			if (nh_encap && rtnl_fill_encap(nh->nh_dev, skb,
+							nh->nh_encap_len,
+							nh_encap))
+				goto nla_put_failure;
+
 			/* length of rtnetlink header + attributes */
 			rtnh->rtnh_len = nlmsg_get_pos(skb) - (void *) rtnh;
 		} endfor_nexthops(fi);
