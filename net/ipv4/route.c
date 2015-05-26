@@ -110,6 +110,8 @@
 #endif
 #include <net/secure_seq.h>
 
+#include "fib_lookup.h"
+
 #define RT_FL_TOS(oldflp4) \
 	((oldflp4)->flowi4_tos & (IPTOS_RT_MASK | RTO_ONLINK))
 
@@ -138,6 +140,8 @@ static void		 ip_rt_update_pmtu(struct dst_entry *dst, struct sock *sk,
 					   struct sk_buff *skb, u32 mtu);
 static void		 ip_do_redirect(struct dst_entry *dst, struct sock *sk,
 					struct sk_buff *skb);
+static int		ipv4_dst_get_encap(const struct dst_entry *dst,
+					   const void **encap);
 static void		ipv4_dst_destroy(struct dst_entry *dst);
 
 static u32 *ipv4_cow_metrics(struct dst_entry *dst, unsigned long old)
@@ -163,6 +167,7 @@ static struct dst_ops ipv4_dst_ops = {
 	.redirect =		ip_do_redirect,
 	.local_out =		__ip_local_out,
 	.neigh_lookup =		ipv4_neigh_lookup,
+	.get_encap =		ipv4_dst_get_encap,
 };
 
 #define ECN_OR_COST(class)	TC_PRIO_##class
@@ -1145,6 +1150,15 @@ static void ipv4_link_failure(struct sk_buff *skb)
 		dst_set_expires(&rt->dst, 0);
 }
 
+static int ipv4_dst_get_encap(const struct dst_entry *dst,
+			      const void **encap)
+{
+	const struct rtable *rt = (const struct rtable *)dst;
+
+	*encap = rt->rt_encap;
+	return rt->rt_encap_len;
+}
+
 static int ip_rt_bug(struct sock *sk, struct sk_buff *skb)
 {
 	pr_debug("%s: %pI4 -> %pI4, %s\n",
@@ -1394,6 +1408,7 @@ static void rt_set_nexthop(struct rtable *rt, __be32 daddr,
 
 	if (fi) {
 		struct fib_nh *nh = &FIB_RES_NH(*res);
+		const void *nh_encap;
 
 		if (nh->nh_gw && nh->nh_scope == RT_SCOPE_LINK) {
 			rt->rt_gateway = nh->nh_gw;
@@ -1403,6 +1418,15 @@ static void rt_set_nexthop(struct rtable *rt, __be32 daddr,
 #ifdef CONFIG_IP_ROUTE_CLASSID
 		rt->dst.tclassid = nh->nh_tclassid;
 #endif
+
+		nh_encap = fib_get_nh_encap(fi, nh);
+		if (unlikely(nh_encap)) {
+			rt->rt_encap = kmemdup(nh_encap, nh->nh_encap_len,
+					       GFP_KERNEL);
+			if (rt->rt_encap)
+				rt->rt_encap_len = nh->nh_encap_len;
+		}
+
 		if (unlikely(fnhe))
 			cached = rt_bind_exception(rt, fnhe, daddr);
 		else if (!(rt->dst.flags & DST_NOCACHE))
@@ -1488,6 +1512,8 @@ static int ip_route_input_mc(struct sk_buff *skb, __be32 daddr, __be32 saddr,
 	rth->rt_gateway	= 0;
 	rth->rt_uses_gateway = 0;
 	INIT_LIST_HEAD(&rth->rt_uncached);
+	rth->rt_encap	= NULL;
+	rth->rt_encap_len = 0;
 	if (our) {
 		rth->dst.input= ip_local_deliver;
 		rth->rt_flags |= RTCF_LOCAL;
@@ -1618,6 +1644,8 @@ static int __mkroute_input(struct sk_buff *skb,
 	rth->rt_gateway	= 0;
 	rth->rt_uses_gateway = 0;
 	INIT_LIST_HEAD(&rth->rt_uncached);
+	rth->rt_encap	= NULL;
+	rth->rt_encap_len = 0;
 	RT_CACHE_STAT_INC(in_slow_tot);
 
 	rth->dst.input = ip_forward;
@@ -1792,6 +1820,8 @@ local_input:
 	rth->rt_gateway	= 0;
 	rth->rt_uses_gateway = 0;
 	INIT_LIST_HEAD(&rth->rt_uncached);
+	rth->rt_encap	= NULL;
+	rth->rt_encap_len = 0;
 	RT_CACHE_STAT_INC(in_slow_tot);
 	if (res.type == RTN_UNREACHABLE) {
 		rth->dst.input= ip_error;
@@ -1981,6 +2011,8 @@ add:
 	rth->rt_gateway = 0;
 	rth->rt_uses_gateway = 0;
 	INIT_LIST_HEAD(&rth->rt_uncached);
+	rth->rt_encap	= NULL;
+	rth->rt_encap_len = 0;
 
 	RT_CACHE_STAT_INC(out_slow_tot);
 
@@ -2261,6 +2293,9 @@ struct dst_entry *ipv4_blackhole_route(struct net *net, struct dst_entry *dst_or
 		rt->rt_uses_gateway = ort->rt_uses_gateway;
 
 		INIT_LIST_HEAD(&rt->rt_uncached);
+
+		rt->rt_encap = NULL;
+		rt->rt_encap_len = 0;
 
 		dst_free(new);
 	}

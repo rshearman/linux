@@ -656,6 +656,9 @@ static int rtm_to_fib_config(struct net *net, struct sk_buff *skb,
 		case RTA_TABLE:
 			cfg->fc_table = nla_get_u32(attr);
 			break;
+		case RTA_ENCAP:
+			cfg->fc_encap = attr;
+			break;
 		}
 	}
 

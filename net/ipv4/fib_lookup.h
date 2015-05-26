@@ -34,6 +34,8 @@ int fib_dump_info(struct sk_buff *skb, u32 pid, u32 seq, int event, u32 tb_id,
 		  unsigned int);
 void rtmsg_fib(int event, __be32 key, struct fib_alias *fa, int dst_len,
 	       u32 tb_id, const struct nl_info *info, unsigned int nlm_flags);
+const void *fib_get_nh_encap(const struct fib_info *fi,
+			     const struct fib_nh *nh);
 
 static inline void fib_result_assign(struct fib_result *res,
 				     struct fib_info *fi)

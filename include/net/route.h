@@ -64,6 +64,9 @@ struct rtable {
 	/* Miscellaneous cached information */
 	u32			rt_pmtu;
 
+	unsigned int		rt_encap_len;
+	void			*rt_encap;
+
 	struct list_head	rt_uncached;
 	struct uncached_list	*rt_uncached_list;
 };
