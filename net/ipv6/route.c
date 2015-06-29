@@ -209,6 +209,15 @@ static struct neighbour *ip6_neigh_lookup(const struct dst_entry *dst,
 	return neigh_create(&nd_tbl, daddr, dst->dev);
 }
 
+static int ip6_dst_get_encap(const struct dst_entry *dst,
+			     const void **encap)
+{
+	struct rt6_info *rt = (struct rt6_info *) dst;
+
+	*encap = rt->rt6i_encap;
+	return rt->rt6i_encap_len;
+}
+
 static struct dst_ops ip6_dst_ops_template = {
 	.family			=	AF_INET6,
 	.gc			=	ip6_dst_gc,
@@ -225,6 +234,7 @@ static struct dst_ops ip6_dst_ops_template = {
 	.redirect		=	rt6_do_redirect,
 	.local_out		=	__ip6_local_out,
 	.neigh_lookup		=	ip6_neigh_lookup,
+	.get_encap 		=	ip6_dst_get_encap,
 };
 
 static unsigned int ip6_blackhole_mtu(const struct dst_entry *dst)
@@ -369,6 +379,8 @@ static void ip6_dst_destroy(struct dst_entry *dst)
 	struct inet6_dev *idev;
 
 	dst_destroy_metrics_generic(dst);
+
+	kfree(rt->rt6i_encap);
 
 	if (rt->rt6i_pcpu)
 		free_percpu(rt->rt6i_pcpu);
@@ -1785,6 +1797,40 @@ int ip6_route_add(struct fib6_config *cfg)
 
 	rt->rt6i_metric = cfg->fc_metric;
 
+	if (cfg->fc_encap) {
+		int encap_len;
+
+		if (!dev) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		/* Determine space required */
+		encap_len = rtnl_parse_encap(dev, cfg->fc_encap, NULL);
+		if (encap_len < 0) {
+			err = encap_len;
+			goto out;
+		}
+		if (encap_len >= sizeof(rt->rt6i_encap_len) * 8) {
+			err = -EINVAL;
+			goto out;
+		}
+
+		rt->rt6i_encap = kmalloc(encap_len, GFP_ATOMIC);
+		if (!rt->rt6i_encap) {
+			err = -ENOMEM;
+			goto out;
+		}
+
+		encap_len = rtnl_parse_encap(dev, cfg->fc_encap,
+					     rt->rt6i_encap);
+		if (encap_len < 0) {
+			err = -EINVAL;
+			goto out;
+		}
+		rt->rt6i_encap_len = encap_len;
+	}
+
 	/* We cannot add true routes via loopback here,
 	   they would result in kernel looping; promote them to reject routes
 	 */
@@ -1989,6 +2035,15 @@ static int ip6_route_del(struct fib6_config *cfg)
 				continue;
 			if (cfg->fc_metric && cfg->fc_metric != rt->rt6i_metric)
 				continue;
+			if (cfg->fc_encap) {
+				if (!rt->dst.dev ||
+				    rtnl_match_encap(rt->dst.dev,
+						     cfg->fc_encap,
+						     rt->rt6i_encap_len,
+						     rt->rt6i_encap))
+					continue;
+			}
+
 			dst_hold(&rt->dst);
 			read_unlock_bh(&table->tb6_lock);
 
@@ -2150,6 +2205,10 @@ static void ip6_rt_copy_init(struct rt6_info *rt, struct rt6_info *ort)
 #endif
 	rt->rt6i_prefsrc = ort->rt6i_prefsrc;
 	rt->rt6i_table = ort->rt6i_table;
+	rt->rt6i_encap = kmemdup(ort->rt6i_encap, ort->rt6i_encap_len,
+				 GFP_KERNEL);
+	if (rt->rt6i_encap)
+		rt->rt6i_encap_len = ort->rt6i_encap_len;
 }
 
 #ifdef CONFIG_IPV6_ROUTE_INFO
@@ -2692,6 +2751,8 @@ static int rtm_to_fib6_config(struct sk_buff *skb, struct nlmsghdr *nlh,
 		cfg->fc_flags |= RTF_PREF(pref);
 	}
 
+	cfg->fc_encap = tb[RTA_ENCAP];
+
 	err = 0;
 errout:
 	return err;
@@ -2786,7 +2847,7 @@ static int inet6_rtm_newroute(struct sk_buff *skb, struct nlmsghdr *nlh)
 		return ip6_route_add(&cfg);
 }
 
-static inline size_t rt6_nlmsg_size(void)
+static inline size_t rt6_nlmsg_size(struct rt6_info *rt)
 {
 	return NLMSG_ALIGN(sizeof(struct rtmsg))
 	       + nla_total_size(16) /* RTA_SRC */
@@ -2800,7 +2861,8 @@ static inline size_t rt6_nlmsg_size(void)
 	       + RTAX_MAX * nla_total_size(4) /* RTA_METRICS */
 	       + nla_total_size(sizeof(struct rta_cacheinfo))
 	       + nla_total_size(TCP_CA_NAME_MAX) /* RTAX_CC_ALGO */
-	       + nla_total_size(1); /* RTA_PREF */
+	       + nla_total_size(1) /* RTA_PREF */
+	       + nla_total_size(rt->rt6i_encap_len); /* RTA_ENCAP */
 }
 
 static int rt6_fill_node(struct net *net,
@@ -2948,6 +3010,11 @@ static int rt6_fill_node(struct net *net,
 	if (nla_put_u8(skb, RTA_PREF, IPV6_EXTRACT_PREF(rt->rt6i_flags)))
 		goto nla_put_failure;
 
+	if (rt->rt6i_encap && rtnl_fill_encap(rt->dst.dev, skb,
+					      rt->rt6i_encap_len,
+					      rt->rt6i_encap))
+		goto nla_put_failure;
+
 	nlmsg_end(skb, nlh);
 	return 0;
 
@@ -3074,7 +3141,7 @@ void inet6_rt_notify(int event, struct rt6_info *rt, struct nl_info *info)
 	err = -ENOBUFS;
 	seq = info->nlh ? info->nlh->nlmsg_seq : 0;
 
-	skb = nlmsg_new(rt6_nlmsg_size(), gfp_any());
+	skb = nlmsg_new(rt6_nlmsg_size(rt), gfp_any());
 	if (!skb)
 		goto errout;
 

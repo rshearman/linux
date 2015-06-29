@@ -49,6 +49,7 @@ struct fib6_config {
 	int		fc_mx_len;
 	int		fc_mp_len;
 	struct nlattr	*fc_mp;
+	struct nlattr	*fc_encap;
 
 	struct nl_info	fc_nlinfo;
 };
@@ -126,11 +127,14 @@ struct rt6_info {
 	struct inet6_dev		*rt6i_idev;
 	struct rt6_info * __percpu	*rt6i_pcpu;
 
+	void				*rt6i_encap;
+
 	u32				rt6i_metric;
 	u32				rt6i_pmtu;
 	/* more non-fragment space at head required */
 	unsigned short			rt6i_nfheader_len;
 	u8				rt6i_protocol;
+	u8				rt6i_encap_len;
 };
 
 static inline struct inet6_dev *ip6_dst_idev(struct dst_entry *dst)
